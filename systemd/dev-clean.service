@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly dev caches cleanup
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dev-clean.sh
+TimeoutStartSec=1h
+SyslogIdentifier=dev-clean
+Nice=19
+IOSchedulingClass=idle

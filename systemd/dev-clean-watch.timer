@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly disk-usage watch for dev-clean
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target

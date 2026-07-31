@@ -1,0 +1,9 @@
+[Unit]
+Description=Check disk usage and trigger dev-clean if disk is nearly full
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dev-clean-watch.sh
+SyslogIdentifier=dev-clean-watch
+Nice=19
+IOSchedulingClass=idle
