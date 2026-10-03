@@ -32,5 +32,5 @@ systemctl --user list-timers 'dev-clean*' --all --no-pager
 if [ -d /etc/apt/apt.conf.d ] && ! cmp -s "$REPO/apt/99dev-clean" /etc/apt/apt.conf.d/99dev-clean; then
   echo
   echo "Щоб apt не накопичував .deb, один раз виконай:"
-  echo "  sudo install -m 644 $REPO/apt/99dev-clean /etc/apt/apt.conf.d/"
+  printf '  sudo install -m 644 %q /etc/apt/apt.conf.d/\n' "$REPO/apt/99dev-clean"
 fi

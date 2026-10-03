@@ -3,9 +3,12 @@
 # Принцип: видаляти лише те, що (а) автоматично відновлюється і (б) давно не використовувалось.
 set -uo pipefail
 
-# systemd дає мінімальний PATH — додаємо pnpm та ~/.local/bin
+# systemd дає мінімальний PATH — додаємо pnpm, ~/.local/bin і node від fnm:
+# pnpm — node-скрипт (`#!/usr/bin/env node`), без node у PATH store prune падає.
+# aliases/default — стабільний симлінк fnm, переживає оновлення версії node.
 export PNPM_HOME="${PNPM_HOME:-$HOME/.local/share/pnpm}"
-export PATH="$PNPM_HOME:$HOME/.local/bin:$PATH"
+FNM_NODE_BIN="${FNM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}/aliases/default/bin"
+export PATH="$PNPM_HOME:$HOME/.local/bin:$FNM_NODE_BIN:$PATH"
 
 # Логування у файл: journald для user-юнітів тут не персистентний, тому весь
 # вивід дублюємо в ~/.local/state/dev-clean.log. Перезапускаємо себе під tee,
@@ -82,7 +85,7 @@ trim_cache_dir() {
 project_root() {
   local d="$1" f
   while [ "$d" != "$HOME" ] && [ "$d" != "$(dirname "$d")" ]; do
-    for f in pnpm-lock.yaml package-lock.json yarn.lock bun.lock bun.lockb deno.lock; do
+    for f in pnpm-lock.yaml package-lock.json npm-shrinkwrap.json yarn.lock bun.lock bun.lockb deno.lock; do
       [ -e "$d/$f" ] && { printf '%s\n' "$d"; return; }
     done
     d="$(dirname "$d")"
@@ -127,6 +130,7 @@ done
 
 # 3. node_modules у проєктах, де 60+ днів не було жодних змін (самі node_modules не рахуються).
 #    Проєкт — див. project_root; у монорепо пакетів багато, тож результат кешуємо по кореню.
+#    .git теж не рахується: фоновий fetch чи `git status` — ще не робота з проєктом.
 declare -A proj_stale=()
 find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
   \( -type d \( -name .git -o -name target \) -prune \) -o \
@@ -135,7 +139,7 @@ while IFS= read -r -d '' n; do
   proj="$(project_root "$(dirname "$n")")"
   if [ -z "${proj_stale[$proj]+set}" ]; then
     proj_stale[$proj]=0
-    [ -n "$(find "$proj" -name node_modules -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ] \
+    [ -n "$(find "$proj" \( -name node_modules -o -name .git \) -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ] \
       || proj_stale[$proj]=1
   fi
   [ "${proj_stale[$proj]}" = 1 ] || continue
@@ -155,7 +159,7 @@ find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
 while IFS= read -r -d '' a; do
   git -C "$(dirname "$a")" check-ignore -q "$a" 2>/dev/null || continue
   proj="$(project_root "$(dirname "$a")")"
-  if [ -z "$(find "$proj" -name node_modules -prune -o -path "$a" -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ]; then
+  if [ -z "$(find "$proj" \( -name node_modules -o -name .git \) -prune -o -path "$a" -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ]; then
     echo "rm artifact: $a ($(du -sh "$a" 2>/dev/null | cut -f1))"
     rm -rf "$a"
   fi
@@ -185,12 +189,33 @@ opts="$(findmnt -no OPTIONS --target "$HOME" 2>/dev/null || true)"
 
 # 4. Кеші пакетних менеджерів — обрізати, не видаляти повністю
 command -v pnpm >/dev/null && pnpm store prune 2>&1 | tail -1
+# Store інших версій pnpm (v3 від pnpm ≤8, v10 …) `store prune` не бачить — він чистить лише свій.
+# Цілий store видаляємо, якщо 90+ днів у ньому нічого не з'являлось і не жорстко лінкувалось
+# (install робить hardlink зі store, а це оновлює ctime файлу). Проєкт, що досі на тій версії,
+# просто перекачає пакети в новий store.
+if command -v pnpm >/dev/null && cur_store="$(pnpm store path 2>/dev/null)" && [ -d "$cur_store" ]; then
+  for s in "$(dirname "$cur_store")"/v*; do
+    [ -d "$s" ] && [ "$s" != "$cur_store" ] || continue
+    [ -z "$(find "$s" \( -newermt '90 days ago' -o -newerct '90 days ago' \) -print -quit 2>/dev/null)" ] || continue
+    echo "rm pnpm store: $s ($(du -sh "$s" 2>/dev/null | cut -f1))"
+    rm -rf "$s"
+  done
+fi
 # npm-кеш самовідновний: якщо файл зникне, npm просто перекачає пакет
 if [[ "$opts" == *noatime* ]]; then
   find "$HOME/.npm/_cacache" -type f -mtime +90 -delete 2>/dev/null
 else
   find "$HOME/.npm/_cacache" -type f -atime +30 -mtime +30 -delete 2>/dev/null
 fi
+# Кеш npx: тека на кожен набір пакетів, ніхто її не прибирає (у нас 3,3 ГБ). Видаляємо цілими
+# теками, яких 30+ днів не перевстановлювали, — npx сам завантажить пакет знову. Теку, з якої
+# зараз працює процес (MCP-сервер через npx), не чіпаємо: він підвантажує модулі ліниво.
+find "$HOME/.npm/_npx" -mindepth 1 -maxdepth 1 -type d -mtime +30 -print0 2>/dev/null |
+while IFS= read -r -d '' x; do
+  pgrep -f -- "/_npx/$(basename "$x")/" >/dev/null && continue
+  echo "rm npx: $x ($(du -sh "$x" 2>/dev/null | cut -f1))"
+  rm -rf "$x"
+done
 command -v uv >/dev/null && uv cache prune -q 2>/dev/null
 # cargo: викачані .crate, старші 90 днів (перекачаються при потребі)
 find "$HOME/.cargo/registry/cache" -name '*.crate' -mtime +90 -delete 2>/dev/null
@@ -235,7 +260,7 @@ if [[ "$opts" == *noatime* ]]; then
   echo "skip ~/.cache: диск змонтовано з noatime, atime ненадійний"
 else
   cache_cutoff='60 days ago'
-  find "$HOME/.cache" -mindepth 1 -maxdepth 1 ! -type l -print0 2>/dev/null |
+  find "$HOME/.cache" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null |
   while IFS= read -r -d '' e; do
     [ -z "$(find "$e" -xdev \
       \( \( ! -type d \( -newerat "$cache_cutoff" -o -newermt "$cache_cutoff" -o -newerct "$cache_cutoff" \) \) \
