@@ -1,2 +1,15 @@
 *.log
 *.tmp
+
+# Бекапи й swap-файли редакторів
+*~
+*.swp
+*.swo
+*.bak
+*.orig
+
+# ОС
+.DS_Store
+
+# Локальні налаштування Claude Code
+.claude/settings.local.json
