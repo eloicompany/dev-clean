@@ -1,0 +1,33 @@
+install.sh
+  s_540441000da005::t_d154cbb25651ea 35
+dev-clean.sh
+  s_540441000da005::t_8125fdd20aff23 88
+  s_540441000da005::t_4e16b6127c829f 162
+  s_540441000da005::t_2491df1b2e4cac 6-8,10-11
+  s_540441000da005::t_ef4c121304de4a 133
+  s_540441000da005::t_6c06ecba9a0e8c 216
+  s_540441000da005::t_b3a77f9504381c 192-203
+  s_540441000da005::t_82c68a668023a8 142
+  s_540441000da005::t_5d848ffd5e90b6 210-215,217-218
+  s_540441000da005::t_22b1da59cd24ef 263
+README.md
+  s_540441000da005::t_ee2ad901ae6570 21-22
+  s_540441000da005::t_7090830a12e17e 32
+  s_540441000da005::t_3401874fa1600e 107
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "67a6e8149efae5dd5c3f239a9985f16c76e97b07",
+  "prompts": {},
+  "sessions": {
+    "s_540441000da005": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed5a320b-0540-44ed-ba89-76e8decfad34",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "VaultTec-Dev <vaulttec-dev@proton.me>"
+    }
+  }
+}
