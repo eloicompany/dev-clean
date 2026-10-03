@@ -1,0 +1,19 @@
+.gitignore
+  s_540441000da005::t_0bedee55df0d7f 3-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "24f2b37031f1adcfaf46800fe621b5eb998c1cb1",
+  "prompts": {},
+  "sessions": {
+    "s_540441000da005": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed5a320b-0540-44ed-ba89-76e8decfad34",
+        "model": "unknown"
+      },
+      "human_author": "VaultTec-Dev <vaulttec-dev@proton.me>"
+    }
+  }
+}
