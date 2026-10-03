@@ -26,3 +26,11 @@ systemctl --user enable --now dev-clean.timer dev-clean-watch.timer
 echo
 echo "Готово. Активні таймери:"
 systemctl --user list-timers 'dev-clean*' --all --no-pager
+
+# Конфіг apt потребує root, тож install.sh його не ставить — лише підказує, якщо його немає
+# або він застарів. Копією, а не симлінком: файл у $HOME дав би змінювати конфіг, який apt читає від root.
+if [ -d /etc/apt/apt.conf.d ] && ! cmp -s "$REPO/apt/99dev-clean" /etc/apt/apt.conf.d/99dev-clean; then
+  echo
+  echo "Щоб apt не накопичував .deb, один раз виконай:"
+  echo "  sudo install -m 644 $REPO/apt/99dev-clean /etc/apt/apt.conf.d/"
+fi

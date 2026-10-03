@@ -1,0 +1,14 @@
+// dev-clean: не накопичувати .deb у /var/cache/apt/archives.
+// Ставиться один раз, копією (не симлінком — apt читає цей файл від root):
+//   sudo install -m 644 ~/Documents/dev-clean/apt/99dev-clean /etc/apt/apt.conf.d/
+//
+// apt-get за замовчуванням тримає кожен завантажений .deb назавжди (лише сам `apt`
+// їх прибирає), тож archives/ росте без меж — у нас набігло 6,2 ГБ за кілька місяців.
+
+// Видаляти .deb одразу після успішного встановлення — як це робить `apt`.
+APT::Keep-Downloaded-Packages "false";
+
+// Раз на 7 днів apt-daily-upgrade.service робить `apt-get autoclean`: прибирає лише .deb,
+// яких уже немає в репозиторіях. Завантажені наперед, але ще не встановлені оновлення
+// лишаються — на відміну від `apt-get clean`.
+APT::Periodic::AutocleanInterval "7";
