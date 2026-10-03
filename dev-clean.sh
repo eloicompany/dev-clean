@@ -38,6 +38,7 @@ TURBO_CACHE_LIMIT_MB="${TURBO_CACHE_LIMIT_MB:-8192}"   # ліміт .turbo/cache
 NEXT_DEV_STALE_DAYS="${NEXT_DEV_STALE_DAYS:-14}"       # вік .next/dev, після якого його видаляємо
 RUST_TARGET_BIG_GB="${RUST_TARGET_BIG_GB:-20}"         # «завеликий» target/
 RUST_TARGET_BIG_STALE_DAYS="${RUST_TARGET_BIG_STALE_DAYS:-7}"
+SKILLS_TRASH_DAYS="${SKILLS_TRASH_DAYS:-30}"           # вік копій у кошику синку веб-скілів Claude Code
 
 echo "=== dev-clean $(date '+%F %T') ${DEV_CLEAN_REASON:+($DEV_CLEAN_REASON) }==="
 df -h / | tail -1
@@ -72,6 +73,23 @@ trim_cache_dir() {
   echo "  звільнено ~$(( freed_kb / 1024 ))МБ"
 }
 
+# Корінь проєкту для перевірки «давно не змінювався»: найближча тека вгору з lockfile.
+# У монорепо node_modules і dist пакетів належать одному кореневому install, тож свіжість
+# треба міряти по всьому workspace — інакше в активному репо зникають залежності пакета,
+# який просто давно не редагували. Lockfile не знайшли — сама тека.
+# $HOME не перевіряємо: випадковий ~/package-lock.json зробив би проєктом увесь дім.
+# project_root <тека>
+project_root() {
+  local d="$1" f
+  while [ "$d" != "$HOME" ] && [ "$d" != "$(dirname "$d")" ]; do
+    for f in pnpm-lock.yaml package-lock.json yarn.lock bun.lock bun.lockb deno.lock; do
+      [ -e "$d/$f" ] && { printf '%s\n' "$d"; return; }
+    done
+    d="$(dirname "$d")"
+  done
+  printf '%s\n' "$1"
+}
+
 # 1. Docker: кеш збірок, старіший за 2 тижні, + образи без тегів.
 #    Контейнери та volumes НЕ чіпаємо — там можуть бути дані.
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
@@ -84,9 +102,11 @@ fi
 #    Ціна помилки — лише одна довга перезбірка, даних не втрачається.
 #    Додатково: «завеликі» target/ (20+ ГБ) чистимо вже після 7 днів простою — саме вони
 #    з'їдають диск в активних репо, де правило 14 днів ніколи не спрацьовує (zed: 96 ГБ).
+#    CACHEDIR.TAG cargo кладе в кожен свій target/: без нього це може бути звичайна тека
+#    з такою назвою (linker-скрипти, target spec), тож не чіпаємо — як і `cargo clean`.
 scan_dirs -name target |
 while IFS= read -r -d '' t; do
-  [ -f "$(dirname "$t")/Cargo.toml" ] || continue
+  [ -f "$(dirname "$t")/Cargo.toml" ] && [ -f "$t/CACHEDIR.TAG" ] || continue
   if [ -z "$(find "$t" -newermt '14 days ago' -print -quit 2>/dev/null)" ]; then
     echo "rm target: $t ($(du -sh "$t" 2>/dev/null | cut -f1))"
     rm -rf "$t"
@@ -94,7 +114,10 @@ while IFS= read -r -d '' t; do
   fi
   # активний репозиторій — але якщо target роздувся і саме він давно не збирався, чистимо debug-профіль
   [ -d "$t/debug" ] || continue
-  size_gb=$(( $(du -sk "$t" 2>/dev/null | cut -f1) / 1048576 ))
+  # du може нічого не вивести (target зник між find і du) — порожній операнд в $(( ))
+  # обірвав би весь цикл, тож решта target/ лишилась би неперевіреною
+  size_kb="$(du -sk "$t" 2>/dev/null | cut -f1)"
+  size_gb=$(( ${size_kb:-0} / 1048576 ))
   [ "$size_gb" -ge "$RUST_TARGET_BIG_GB" ] || continue
   if [ -z "$(find "$t/debug" -newermt "$RUST_TARGET_BIG_STALE_DAYS days ago" -print -quit 2>/dev/null)" ]; then
     echo "rm target/debug: $t/debug (${size_gb}ГБ target, не збирався ${RUST_TARGET_BIG_STALE_DAYS}+ днів)"
@@ -102,29 +125,37 @@ while IFS= read -r -d '' t; do
   fi
 done
 
-# 3. node_modules у теках, де 60+ днів не було жодних змін (сам node_modules не рахується)
+# 3. node_modules у проєктах, де 60+ днів не було жодних змін (самі node_modules не рахуються).
+#    Проєкт — див. project_root; у монорепо пакетів багато, тож результат кешуємо по кореню.
+declare -A proj_stale=()
 find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
   \( -type d \( -name .git -o -name target \) -prune \) -o \
   \( -type d -name node_modules -prune -print0 \) 2>/dev/null |
 while IFS= read -r -d '' n; do
-  repo="$(dirname "$n")"
-  if [ -z "$(find "$repo" -name node_modules -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ]; then
-    echo "rm node_modules: $n ($(du -sh "$n" 2>/dev/null | cut -f1))"
-    rm -rf "$n"
+  proj="$(project_root "$(dirname "$n")")"
+  if [ -z "${proj_stale[$proj]+set}" ]; then
+    proj_stale[$proj]=0
+    [ -n "$(find "$proj" -name node_modules -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ] \
+      || proj_stale[$proj]=1
   fi
+  [ "${proj_stale[$proj]}" = 1 ] || continue
+  echo "rm node_modules: $n ($(du -sh "$n" 2>/dev/null | cut -f1))"
+  rm -rf "$n"
 done
 
-# 3b. Артефакти збірок у теках без змін 60+ днів. Видаляємо лише те,
+# 3b. Артефакти збірок у проєктах без змін 60+ днів. Видаляємо лише те,
 #     що git сам вважає сміттям (check-ignore) — код під це не потрапить.
+#     Проєкт — як для node_modules: dist пакета-бібліотеки потрібен застосункам монорепо.
+#     У target/ не спускаємось: Rust target/ веде крок 2, а його debug/build — не наш build.
 find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
-  \( -type d \( -name node_modules -o -name .git \) -prune \) -o \
+  \( -type d \( -name node_modules -o -name .git -o -name target \) -prune \) -o \
   \( -type d \( -name .next -o -name .turbo -o -name dist -o -name build -o -name .venv \
      -o -name venv -o -name __pycache__ -o -name .pytest_cache -o -name coverage \) \
   -prune -print0 \) 2>/dev/null |
 while IFS= read -r -d '' a; do
-  repo="$(dirname "$a")"
-  git -C "$repo" check-ignore -q "$a" 2>/dev/null || continue
-  if [ -z "$(find "$repo" -name node_modules -prune -o -path "$a" -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ]; then
+  git -C "$(dirname "$a")" check-ignore -q "$a" 2>/dev/null || continue
+  proj="$(project_root "$(dirname "$a")")"
+  if [ -z "$(find "$proj" -name node_modules -prune -o -path "$a" -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ]; then
     echo "rm artifact: $a ($(du -sh "$a" 2>/dev/null | cut -f1))"
     rm -rf "$a"
   fi
@@ -172,21 +203,56 @@ if [ -d "$TRASH/files" ]; then
   find "$TRASH/files" -mindepth 1 -maxdepth 1 -ctime +30 -exec rm -rf {} + 2>/dev/null
   for i in "$TRASH"/info/*.trashinfo; do
     [ -e "$i" ] || break
-    [ -e "$TRASH/files/$(basename "$i" .trashinfo)" ] || rm -f "$i"
+    # -L окремо: для битого симлінка в кошику -e хибне, а сам елемент ще на місці
+    f="$TRASH/files/$(basename "$i" .trashinfo)"
+    [ -e "$f" ] || [ -L "$f" ] || rm -f "$i"
   done
 fi
 
-# 6. ~/.cache: файли, яких 60+ днів ніхто не читав і не змінював.
-#    atime надійний лише без noatime (типовий relatime підходить).
+# 5b. Кошик синку веб-скілів Claude Code. Кожен `CLAUDE_CODE_SYNC_SKILLS=1 claude -p`
+#     складає туди попередню копію всього набору скілів окремою текою і ніколи її не прибирає:
+#     21 МБ / 41 тека набігло за три тижні. Тримаємо 30 днів як страховку — якщо синк
+#     привезе зіпсований скіл, з кошика можна дістати попередню версію.
+#     ctime, а не mtime: значення має момент переміщення в кошик, а не вік самих файлів.
+SKILLS_TRASH="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills/.trash"
+if [ -d "$SKILLS_TRASH" ]; then
+  before_mb="$(du -sm "$SKILLS_TRASH" 2>/dev/null | cut -f1)"
+  find "$SKILLS_TRASH" -mindepth 1 -maxdepth 1 -ctime +"$SKILLS_TRASH_DAYS" -exec rm -rf {} + 2>/dev/null
+  after_mb="$(du -sm "$SKILLS_TRASH" 2>/dev/null | cut -f1)"
+  echo "кошик скілів: ${before_mb:-?}МБ -> ${after_mb:-?}МБ"
+fi
+
+# 6. ~/.cache: теки верхнього рівня (за XDG — по одній на застосунок), у яких 60+ днів
+#    ніхто нічого не читав і не змінював, видаляємо цілком.
+#    Окремі файли не чіпаємо: тут живуть і тулчейни (ms-playwright, corepack, node-gyp,
+#    prisma), а вони перевіряють лише наявність теки версії. Без рідко читаних файлів
+#    (локалі, .so, заголовки) вона лишилась би напівживою, і інструмент її б не перекачав;
+#    теку, якої немає зовсім, кожен із них відновлює сам.
+#    atime тек не враховуємо: його оновлює наш же find, коли читає їхній вміст.
+#    Симлінки пропускаємо — це перенесений кудись кеш, а не сам кеш.
+#    atime файлів надійний лише без noatime (типовий relatime підходить).
 if [[ "$opts" == *noatime* ]]; then
   echo "skip ~/.cache: диск змонтовано з noatime, atime ненадійний"
 else
-  find "$HOME/.cache" -xdev -type f -atime +60 -mtime +60 -ctime +60 -delete 2>/dev/null
-  find "$HOME/.cache" -mindepth 1 -xdev -type d -empty -delete 2>/dev/null
+  cache_cutoff='60 days ago'
+  find "$HOME/.cache" -mindepth 1 -maxdepth 1 ! -type l -print0 2>/dev/null |
+  while IFS= read -r -d '' e; do
+    [ -z "$(find "$e" -xdev \
+      \( \( ! -type d \( -newerat "$cache_cutoff" -o -newermt "$cache_cutoff" -o -newerct "$cache_cutoff" \) \) \
+      -o \( -type d \( -newermt "$cache_cutoff" -o -newerct "$cache_cutoff" \) \) \) \
+      -print -quit 2>/dev/null)" ] || continue
+    echo "rm ~/.cache: $e ($(du -sh "$e" 2>/dev/null | cut -f1))"
+    rm -rf --one-file-system "$e"
+  done
 fi
 
 # 7. Flatpak: рантайми, на які ніхто не посилається
 command -v flatpak >/dev/null && flatpak uninstall --unused -y --noninteractive >/dev/null 2>&1
+
+# Системні кеші (apt-архіви, журнал journald) скрипт свідомо не чіпає: їм потрібен root,
+# а user-таймеру його дало б лише NOPASSWD-правило в sudoers. Їх обмежують штатні
+# налаштування, які діють постійно, а не раз на тиждень: apt/99dev-clean (див. README)
+# і SystemMaxUse самого journald.
 
 # Сповіщення, якщо диск усе одно переповнений
 pct="$(df --output=pcent / | tail -1 | tr -dc '0-9')"
