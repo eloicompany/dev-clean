@@ -1,0 +1,37 @@
+install.sh
+  s_540441000da005::t_85a91aec8cbaa2 29-36
+apt/99dev-clean
+  s_540441000da005::t_7e35611c11e599 1-14
+dev-clean.sh
+  s_540441000da005::t_5c446ee466e8c8 206-208
+  s_540441000da005::t_425b005e460909 76-92
+  s_540441000da005::t_68db1370484e00 252-255
+  s_540441000da005::t_25b25e4d6c7ab2 128-130,135-139,141-143
+  s_540441000da005::t_fc30c235a7378e 225-233,237-246
+  s_540441000da005::t_3fb38206b88d1a 117-120
+  s_540441000da005::t_115b96a131691d 146,148-149,151,156-158
+  s_540441000da005::t_1a711d89b1a68a 105-106,109
+  s_540441000da005::t_2a223002532e19 222-224
+  s_540441000da005::t_50b3f5668ce2ee 256
+  s_540441000da005::t_1f7dae0f17e1c6 41,212-221
+README.md
+  s_540441000da005::t_20a76b4597cb6d 94
+  s_540441000da005::t_c632d4a5d5dd06 42-55
+  s_540441000da005::t_6342f90d6b8292 14,16-17,21,23,26,30-31
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5ee31bb5e7e91921695566138ed62ee381b6e40e",
+  "prompts": {},
+  "sessions": {
+    "s_540441000da005": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "ed5a320b-0540-44ed-ba89-76e8decfad34",
+        "model": "unknown"
+      },
+      "human_author": "VaultTec-Dev <vaulttec-dev@proton.me>"
+    }
+  }
+}
