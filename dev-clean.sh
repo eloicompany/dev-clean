@@ -42,6 +42,8 @@ NEXT_DEV_STALE_DAYS="${NEXT_DEV_STALE_DAYS:-14}"       # вік .next/dev, пі�
 RUST_TARGET_BIG_GB="${RUST_TARGET_BIG_GB:-20}"         # «завеликий» target/
 RUST_TARGET_BIG_STALE_DAYS="${RUST_TARGET_BIG_STALE_DAYS:-7}"
 SKILLS_TRASH_DAYS="${SKILLS_TRASH_DAYS:-30}"           # вік копій у кошику синку веб-скілів Claude Code
+WORKTREE_TARGET_STALE_DAYS="${WORKTREE_TARGET_STALE_DAYS:-3}"  # простій target/ у git worktree
+DOCKER_CACHE_LIMIT_GB="${DOCKER_CACHE_LIMIT_GB:-10}"   # стеля Docker build cache
 
 echo "=== dev-clean $(date '+%F %T') ${DEV_CLEAN_REASON:+($DEV_CLEAN_REASON) }==="
 df -h / | tail -1
@@ -98,6 +100,10 @@ project_root() {
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   docker builder prune -f --filter until=336h 2>/dev/null \
     || docker builder prune -f --filter unused-for=336h
+  # Плюс стеля розміру (LRU — найдавніше використане йде першим): одна збірка лишає
+  # 30+ ГБ кешу, і правило «2 тижні» до нього не дотягується, поки диск не переповниться.
+  # Старий docker не знає --max-used-space — тоді лише TTL вище.
+  docker builder prune -f --max-used-space "${DOCKER_CACHE_LIMIT_GB}GB" 2>/dev/null | tail -1
   docker image prune -f
 fi
 
@@ -110,6 +116,22 @@ fi
 scan_dirs -name target |
 while IFS= read -r -d '' t; do
   [ -f "$(dirname "$t")/Cargo.toml" ] && [ -f "$t/CACHEDIR.TAG" ] || continue
+  # target/ у додатковому git worktree (worktree агентів Claude Code, гілки під PR) —
+  # повна копія збірки на 10–15 ГБ на кожну гілку; за тиждень їх набігає 70+ ГБ.
+  # Worktree живе коротко, тож чистимо вже після кількох днів простою. Сам worktree
+  # (і незакомічена робота в ньому) лишається — зникає тільки target/.
+  # Додатковий worktree: його git-dir (.git/worktrees/<name>) не збігається зі спільним.
+  # Шляхи — абсолютні: відносний вивід rev-parse дав би хибну розбіжність.
+  gd="$(git -C "$(dirname "$t")" rev-parse --path-format=absolute --git-dir 2>/dev/null)"
+  gcd="$(git -C "$(dirname "$t")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  if [ -n "$gd" ] && [ "$gd" != "$gcd" ] &&
+     [ -z "$(find "$t" -newermt "$WORKTREE_TARGET_STALE_DAYS days ago" -print -quit 2>/dev/null)" ]; then
+    # cargo чи rust-analyzer саме збирає в цьому worktree — не заважаємо
+    if pgrep -f -- "$(dirname "$t")/" >/dev/null; then continue; fi
+    echo "rm worktree target: $t ($(du -sh "$t" 2>/dev/null | cut -f1))"
+    rm -rf "$t"
+    continue
+  fi
   if [ -z "$(find "$t" -newermt '14 days ago' -print -quit 2>/dev/null)" ]; then
     echo "rm target: $t ($(du -sh "$t" 2>/dev/null | cut -f1))"
     rm -rf "$t"
@@ -165,6 +187,24 @@ while IFS= read -r -d '' a; do
   fi
 done
 
+# 3b'. Unity: Library/ (імпортовані ассети, 10+ ГБ на проєкт), Temp/, obj/ — Unity генерує їх
+#      заново при відкритті проєкту (ціна — довгий реімпорт). Проєкт — тека з
+#      ProjectSettings/ProjectVersion.txt; чистимо, якщо в ньому 60+ днів нічого не змінювалось
+#      (самі збіркові теки й .git не рахуються) і git підтверджує, що це сміття.
+find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
+  \( -type d \( -name node_modules -o -name .git -o -name target -o -name Library \) -prune \) -o \
+  \( -type f -path '*/ProjectSettings/ProjectVersion.txt' -print0 \) 2>/dev/null |
+while IFS= read -r -d '' v; do
+  proj="$(dirname "$(dirname "$v")")"
+  [ -n "$(find "$proj" \( -name Library -o -name Temp -o -name obj -o -name Logs -o -name .git \) -prune \
+    -o -newermt '60 days ago' -print -quit 2>/dev/null)" ] && continue
+  for a in "$proj/Library" "$proj/Temp" "$proj/obj"; do
+    [ -d "$a" ] && git -C "$proj" check-ignore -q "$a" 2>/dev/null || continue
+    echo "rm unity: $a ($(du -sh "$a" 2>/dev/null | cut -f1))"
+    rm -rf "$a"
+  done
+done
+
 # 3c. Кеш turborepo: спершу записи, старші 30 днів, потім ліміт розміру.
 #     Ліміт обов'язковий: один запис кешу тягне десятки ГБ, тож 83 ГБ набігає за тиждень
 #     і правило «старші 30 днів» не спрацьовує жодного разу. Втрата = лише cache miss.
@@ -172,6 +212,16 @@ scan_dirs -path '*/.turbo/cache' |
 while IFS= read -r -d '' c; do
   find "$c" -type f -mtime +30 -delete 2>/dev/null
   trim_cache_dir "$c" "$TURBO_CACHE_LIMIT_MB"
+done
+
+# 3c'. Кеш Nx: у репозиторії (.nx/cache) і глобальний (~/.nx/<workspace>/cache). Кожен запис —
+#      тека виводу однієї задачі; Nx сам їх не прибирає. Втрата = лише cache miss.
+{ scan_dirs -path '*/.nx/cache'; find "$HOME/.nx" -mindepth 2 -maxdepth 2 -type d -name cache -print0 2>/dev/null; } |
+while IFS= read -r -d '' c; do
+  n="$(find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -print 2>/dev/null | wc -l)"
+  [ "$n" -gt 0 ] || continue
+  echo "nx cache: $c — видаляю $n записів старших 30 днів"
+  find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null
 done
 
 # 3d. .next/dev — кеш turbopack dev-сервера (у doc2pay доростав до 6,8 ГБ на застосунок).
@@ -219,6 +269,34 @@ done
 command -v uv >/dev/null && uv cache prune -q 2>/dev/null
 # cargo: викачані .crate, старші 90 днів (перекачаються при потребі)
 find "$HOME/.cargo/registry/cache" -name '*.crate' -mtime +90 -delete 2>/dev/null
+
+# 4b. Rust-тулчейни конкретних версій (1.95.0-…), на які ніщо не посилається: не default,
+#     не override і не згадані в жодному rust-toolchain(.toml) у теках сканування, встановлені
+#     60+ днів тому. Кожен — 1–2 ГБ, і з кожним `channel = "1.x"` у новому проєкті їх додається.
+#     Проєкт поза скануванням, якому версія таки потрібна, rustup доставить сам при першій збірці.
+#     stable/beta/nightly не чіпаємо — ними керує сам rustup.
+if command -v rustup >/dev/null; then
+  rt_home="${RUSTUP_HOME:-$HOME/.rustup}"
+  rt_default="$(rustup default 2>/dev/null | cut -d' ' -f1)"
+  rt_used="$(
+    find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
+      \( -type d \( -name node_modules -o -name .git -o -name target \) -prune \) -o \
+      \( -type f \( -name rust-toolchain -o -name rust-toolchain.toml \) -print0 \) 2>/dev/null |
+      xargs -0 -r cat 2>/dev/null
+    rustup override list 2>/dev/null
+  )"
+  rustup toolchain list 2>/dev/null | cut -d' ' -f1 |
+  while IFS= read -r tc; do
+    [[ "$tc" =~ ^([0-9]+\.[0-9]+(\.[0-9]+)?)- ]] || continue
+    ver="${BASH_REMATCH[1]}"
+    [ "$tc" = "$rt_default" ] && continue
+    # версія в rust-toolchain — у лапках (`channel = "1.95.0"`) або рядком (старий формат)
+    grep -qE "(\"|^|[[:space:]])${ver//./\\.}(\"|-|$|[[:space:]])" <<< "$rt_used" && continue
+    [ -n "$(find "$rt_home/toolchains/$tc" -maxdepth 0 -mtime -60 2>/dev/null)" ] && continue
+    echo "rustup uninstall: $tc ($(du -sh "$rt_home/toolchains/$tc" 2>/dev/null | cut -f1))"
+    rustup toolchain uninstall "$tc" >/dev/null 2>&1
+  done
+fi
 
 # 5. Кошик: лише покладене туди 30+ днів тому.
 #    ctime оновлюється в момент переміщення в кошик; чистимо тільки верхній рівень,
