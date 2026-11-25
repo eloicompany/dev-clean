@@ -78,6 +78,30 @@ trim_cache_dir() {
   echo "  звільнено ~$(( freed_kb / 1024 ))МБ"
 }
 
+# Виконує команду, а потім повертає теці її попередній mtime.
+# Видалення запису оновлює mtime батьківської теки, а перевірки «проєкт без змін 60+ днів»
+# дивляться на mtime усього дерева. Без цього власна чистка скрипта вважалась би роботою
+# з проєктом: прибрали node_modules — і dist, .turbo, .venv того ж покинутого проєкту
+# лишались ще на 60 днів. Виклики не вкладаються: еталон mtime один на весь скрипт.
+# keep_mtime <тека> <команда...>
+MTIME_REF="$(mktemp)"
+trap 'rm -f "$MTIME_REF"' EXIT
+keep_mtime() {
+  local dir="$1"; shift
+  if [ -d "$dir" ] && touch -r "$dir" "$MTIME_REF" 2>/dev/null; then
+    "$@"
+    touch -r "$MTIME_REF" "$dir" 2>/dev/null
+  else
+    "$@"
+  fi
+}
+
+# rm -rf, яке не робить батьківську теку «щойно зміненою»
+# rm_tree <шлях>
+rm_tree() {
+  keep_mtime "$(dirname "$1")" rm -rf -- "$1"
+}
+
 # Корінь проєкту для перевірки «давно не змінювався»: найближча тека вгору з lockfile.
 # У монорепо node_modules і dist пакетів належать одному кореневому install, тож свіжість
 # треба міряти по всьому workspace — інакше в активному репо зникають залежності пакета,
@@ -129,12 +153,12 @@ while IFS= read -r -d '' t; do
     # cargo чи rust-analyzer саме збирає в цьому worktree — не заважаємо
     if pgrep -f -- "$(dirname "$t")/" >/dev/null; then continue; fi
     echo "rm worktree target: $t ($(du -sh "$t" 2>/dev/null | cut -f1))"
-    rm -rf "$t"
+    rm_tree "$t"
     continue
   fi
   if [ -z "$(find "$t" -newermt '14 days ago' -print -quit 2>/dev/null)" ]; then
     echo "rm target: $t ($(du -sh "$t" 2>/dev/null | cut -f1))"
-    rm -rf "$t"
+    rm_tree "$t"
     continue
   fi
   # активний репозиторій — але якщо target роздувся і саме він давно не збирався, чистимо debug-профіль
@@ -146,7 +170,7 @@ while IFS= read -r -d '' t; do
   [ "$size_gb" -ge "$RUST_TARGET_BIG_GB" ] || continue
   if [ -z "$(find "$t/debug" -newermt "$RUST_TARGET_BIG_STALE_DAYS days ago" -print -quit 2>/dev/null)" ]; then
     echo "rm target/debug: $t/debug (${size_gb}ГБ target, не збирався ${RUST_TARGET_BIG_STALE_DAYS}+ днів)"
-    rm -rf "$t/debug"
+    rm_tree "$t/debug"
   fi
 done
 
@@ -166,7 +190,7 @@ while IFS= read -r -d '' n; do
   fi
   [ "${proj_stale[$proj]}" = 1 ] || continue
   echo "rm node_modules: $n ($(du -sh "$n" 2>/dev/null | cut -f1))"
-  rm -rf "$n"
+  rm_tree "$n"
 done
 
 # 3b. Артефакти збірок у проєктах без змін 60+ днів. Видаляємо лише те,
@@ -183,7 +207,7 @@ while IFS= read -r -d '' a; do
   proj="$(project_root "$(dirname "$a")")"
   if [ -z "$(find "$proj" \( -name node_modules -o -name .git \) -prune -o -path "$a" -prune -o -newermt '60 days ago' -print -quit 2>/dev/null)" ]; then
     echo "rm artifact: $a ($(du -sh "$a" 2>/dev/null | cut -f1))"
-    rm -rf "$a"
+    rm_tree "$a"
   fi
 done
 
@@ -201,7 +225,7 @@ while IFS= read -r -d '' v; do
   for a in "$proj/Library" "$proj/Temp" "$proj/obj"; do
     [ -d "$a" ] && git -C "$proj" check-ignore -q "$a" 2>/dev/null || continue
     echo "rm unity: $a ($(du -sh "$a" 2>/dev/null | cut -f1))"
-    rm -rf "$a"
+    rm_tree "$a"
   done
 done
 
@@ -210,8 +234,8 @@ done
 #     і правило «старші 30 днів» не спрацьовує жодного разу. Втрата = лише cache miss.
 scan_dirs -path '*/.turbo/cache' |
 while IFS= read -r -d '' c; do
-  find "$c" -type f -mtime +30 -delete 2>/dev/null
-  trim_cache_dir "$c" "$TURBO_CACHE_LIMIT_MB"
+  keep_mtime "$c" find "$c" -type f -mtime +30 -delete 2>/dev/null
+  keep_mtime "$c" trim_cache_dir "$c" "$TURBO_CACHE_LIMIT_MB"
 done
 
 # 3c'. Кеш Nx: у репозиторії (.nx/cache) і глобальний (~/.nx/<workspace>/cache). Кожен запис —
@@ -221,7 +245,7 @@ while IFS= read -r -d '' c; do
   n="$(find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -print 2>/dev/null | wc -l)"
   [ "$n" -gt 0 ] || continue
   echo "nx cache: $c — видаляю $n записів старших 30 днів"
-  find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null
+  keep_mtime "$c" find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null
 done
 
 # 3d. .next/dev — кеш turbopack dev-сервера (у doc2pay доростав до 6,8 ГБ на застосунок).
@@ -230,7 +254,7 @@ scan_dirs -path '*/.next/dev' |
 while IFS= read -r -d '' d; do
   if [ -z "$(find "$d" -newermt "$NEXT_DEV_STALE_DAYS days ago" -print -quit 2>/dev/null)" ]; then
     echo "rm .next/dev: $d ($(du -sh "$d" 2>/dev/null | cut -f1))"
-    rm -rf "$d"
+    rm_tree "$d"
   fi
 done
 
