@@ -19,6 +19,8 @@
 | `.next`, `.turbo`, `dist`, `build`, `.venv`, `__pycache__`, `coverage` | проєкт без змін 60+ днів і лише якщо `git check-ignore` підтверджує, що це сміття |
 | Unity `Library/`, `Temp/`, `obj/` | Unity-проєкт (є `ProjectSettings/ProjectVersion.txt`) без змін 60+ днів і лише якщо `git check-ignore` підтверджує |
 | `.turbo/cache` | записи, старші 30 днів, **плюс** LRU-обрізання до 8 ГБ на репозиторій |
+| `.nx/cache`, `~/.nx/*/cache` (кеш задач Nx) | записи, старші 30 днів |
+| Rust-тулчейни конкретних версій (`1.95.0-…`) | не default, без override, жоден `rust-toolchain(.toml)` у теках сканування на них не посилається, встановлені 60+ днів тому |
 | `.next/dev` (кеш turbopack dev-сервера) | 14+ днів без змін |
 | pnpm store, npm `_cacache`, `uv cache`, `.crate` | prune / TTL 90 днів |
 | store інших версій pnpm (`v3`, `v10` …) | цілком, якщо 90+ днів у ньому нічого не з'являлось і з нього не ставили пакети |

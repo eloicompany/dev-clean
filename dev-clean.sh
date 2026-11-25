@@ -214,6 +214,16 @@ while IFS= read -r -d '' c; do
   trim_cache_dir "$c" "$TURBO_CACHE_LIMIT_MB"
 done
 
+# 3c'. Кеш Nx: у репозиторії (.nx/cache) і глобальний (~/.nx/<workspace>/cache). Кожен запис —
+#      тека виводу однієї задачі; Nx сам їх не прибирає. Втрата = лише cache miss.
+{ scan_dirs -path '*/.nx/cache'; find "$HOME/.nx" -mindepth 2 -maxdepth 2 -type d -name cache -print0 2>/dev/null; } |
+while IFS= read -r -d '' c; do
+  n="$(find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -print 2>/dev/null | wc -l)"
+  [ "$n" -gt 0 ] || continue
+  echo "nx cache: $c — видаляю $n записів старших 30 днів"
+  find "$c" -mindepth 1 -maxdepth 1 -mtime +30 -exec rm -rf {} + 2>/dev/null
+done
+
 # 3d. .next/dev — кеш turbopack dev-сервера (у doc2pay доростав до 6,8 ГБ на застосунок).
 #     Відновлюється сам при наступному `next dev`, ціна — повільніший перший старт.
 scan_dirs -path '*/.next/dev' |
@@ -259,6 +269,34 @@ done
 command -v uv >/dev/null && uv cache prune -q 2>/dev/null
 # cargo: викачані .crate, старші 90 днів (перекачаються при потребі)
 find "$HOME/.cargo/registry/cache" -name '*.crate' -mtime +90 -delete 2>/dev/null
+
+# 4b. Rust-тулчейни конкретних версій (1.95.0-…), на які ніщо не посилається: не default,
+#     не override і не згадані в жодному rust-toolchain(.toml) у теках сканування, встановлені
+#     60+ днів тому. Кожен — 1–2 ГБ, і з кожним `channel = "1.x"` у новому проєкті їх додається.
+#     Проєкт поза скануванням, якому версія таки потрібна, rustup доставить сам при першій збірці.
+#     stable/beta/nightly не чіпаємо — ними керує сам rustup.
+if command -v rustup >/dev/null; then
+  rt_home="${RUSTUP_HOME:-$HOME/.rustup}"
+  rt_default="$(rustup default 2>/dev/null | cut -d' ' -f1)"
+  rt_used="$(
+    find "${SCAN_ROOTS[@]}" -maxdepth "$SCAN_DEPTH" \
+      \( -type d \( -name node_modules -o -name .git -o -name target \) -prune \) -o \
+      \( -type f \( -name rust-toolchain -o -name rust-toolchain.toml \) -print0 \) 2>/dev/null |
+      xargs -0 -r cat 2>/dev/null
+    rustup override list 2>/dev/null
+  )"
+  rustup toolchain list 2>/dev/null | cut -d' ' -f1 |
+  while IFS= read -r tc; do
+    [[ "$tc" =~ ^([0-9]+\.[0-9]+(\.[0-9]+)?)- ]] || continue
+    ver="${BASH_REMATCH[1]}"
+    [ "$tc" = "$rt_default" ] && continue
+    # версія в rust-toolchain — у лапках (`channel = "1.95.0"`) або рядком (старий формат)
+    grep -qE "(\"|^|[[:space:]])${ver//./\\.}(\"|-|$|[[:space:]])" <<< "$rt_used" && continue
+    [ -n "$(find "$rt_home/toolchains/$tc" -maxdepth 0 -mtime -60 2>/dev/null)" ] && continue
+    echo "rustup uninstall: $tc ($(du -sh "$rt_home/toolchains/$tc" 2>/dev/null | cut -f1))"
+    rustup toolchain uninstall "$tc" >/dev/null 2>&1
+  done
+fi
 
 # 5. Кошик: лише покладене туди 30+ днів тому.
 #    ctime оновлюється в момент переміщення в кошик; чистимо тільки верхній рівень,
